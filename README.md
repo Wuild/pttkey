@@ -31,14 +31,14 @@ pttkey --list-keys
 
 | Argument | Meaning | Default / Notes |
 | --- | --- | --- |
-| `--key <NAME|CODE>` | Evdev key name or numeric code. Can be repeated or combined with `+` for chords (e.g. `--key KEY_LEFTCTRL+KEY_F`). | Default: `BTN_EXTRA` |
+| `--key <NAME\|CODE>` | Evdev key name or numeric code. Can be repeated or combined with `+` for chords (e.g. `--key KEY_LEFTCTRL+KEY_F`). | Default: `BTN_EXTRA` |
 | `--device <PATH>` | Input device path to use instead of auto-detect. | Optional |
-| `--mode <volume|mute>` | Control by volume level or `set-mute`. | Default: `volume` |
+| `--mode <volume\|mute>` | Control by volume level or `set-mute`. | Default: `volume` |
 | `--on-level <FLOAT>` | Volume when pressed. | Default: `1.0` |
 | `--off-level <FLOAT>` | Volume when released. | Default: `0.0` |
 | `--sound-on <PATH>` | Custom sound file for mic on (`mp3`, `wav`, `ogg`). | Optional |
 | `--sound-off <PATH>` | Custom sound file for mic off (`mp3`, `wav`, `ogg`). | Optional |
-| `--startup-state <muted|unmuted>` | Initial mic state. | Default: `muted` |
+| `--startup-state <muted\|unmuted>` | Initial mic state. | Default: `muted` |
 | `--sounds` | Enable on/off sounds using system default sounds. | Enabled by default |
 | `--no-sounds` | Disable on/off sounds. | Overrides `--sounds` |
 | `--list-keys` | Print supported key names and exit. |  |
