@@ -1,0 +1,14 @@
+/target
+/dist
+*.tar.gz
+
+# Rust
+**/*.rs.bk
+
+# IDE/editor
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
