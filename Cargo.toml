@@ -4,8 +4,8 @@ version = "0.2.0"
 edition = "2021"
 
 [dependencies]
-evdev = "0.12"
+evdev = "0.13.2"
 anyhow = "1.0"
-which = "5.0"
+which = "8.0.0"
 ctrlc = "3.5.1"
-rodio = { version = "0.19", default-features = false, features = ["mp3", "wav", "vorbis"] }
+rodio = { version = "0.21.1", default-features = false, features = ["mp3", "wav", "vorbis", "playback"] }

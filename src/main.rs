@@ -1,7 +1,7 @@
 //! Push-to-talk mic control for PipeWire using evdev input devices.
 
 use anyhow::{bail, Context, Result};
-use evdev::{Device, InputEventKind, Key};
+use evdev::{Device, EventSummary, KeyCode};
 use std::collections::HashSet;
 use std::env;
 use std::fs::File;
@@ -11,135 +11,135 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use rodio::{Decoder, OutputStream, Sink};
+use rodio::{Decoder, OutputStreamBuilder, Sink};
 
 const DEFAULT_SOUND_ON_EVENT: &str = "audio-volume-change";
 const DEFAULT_SOUND_OFF_EVENT: &str = "audio-volume-muted";
 
-const SUPPORTED_KEYS: &[(&str, Key)] = &[
+const SUPPORTED_KEYS: &[(&str, KeyCode)] = &[
     // Mouse buttons
-    ("BTN_LEFT", Key::BTN_LEFT),
-    ("BTN_RIGHT", Key::BTN_RIGHT),
-    ("BTN_MIDDLE", Key::BTN_MIDDLE),
-    ("BTN_SIDE", Key::BTN_SIDE),
-    ("BTN_EXTRA", Key::BTN_EXTRA),
-    ("BTN_FORWARD", Key::BTN_FORWARD),
-    ("BTN_BACK", Key::BTN_BACK),
+    ("BTN_LEFT", KeyCode::BTN_LEFT),
+    ("BTN_RIGHT", KeyCode::BTN_RIGHT),
+    ("BTN_MIDDLE", KeyCode::BTN_MIDDLE),
+    ("BTN_SIDE", KeyCode::BTN_SIDE),
+    ("BTN_EXTRA", KeyCode::BTN_EXTRA),
+    ("BTN_FORWARD", KeyCode::BTN_FORWARD),
+    ("BTN_BACK", KeyCode::BTN_BACK),
     // Letters
-    ("KEY_A", Key::KEY_A),
-    ("KEY_B", Key::KEY_B),
-    ("KEY_C", Key::KEY_C),
-    ("KEY_D", Key::KEY_D),
-    ("KEY_E", Key::KEY_E),
-    ("KEY_F", Key::KEY_F),
-    ("KEY_G", Key::KEY_G),
-    ("KEY_H", Key::KEY_H),
-    ("KEY_I", Key::KEY_I),
-    ("KEY_J", Key::KEY_J),
-    ("KEY_K", Key::KEY_K),
-    ("KEY_L", Key::KEY_L),
-    ("KEY_M", Key::KEY_M),
-    ("KEY_N", Key::KEY_N),
-    ("KEY_O", Key::KEY_O),
-    ("KEY_P", Key::KEY_P),
-    ("KEY_Q", Key::KEY_Q),
-    ("KEY_R", Key::KEY_R),
-    ("KEY_S", Key::KEY_S),
-    ("KEY_T", Key::KEY_T),
-    ("KEY_U", Key::KEY_U),
-    ("KEY_V", Key::KEY_V),
-    ("KEY_W", Key::KEY_W),
-    ("KEY_X", Key::KEY_X),
-    ("KEY_Y", Key::KEY_Y),
-    ("KEY_Z", Key::KEY_Z),
+    ("KEY_A", KeyCode::KEY_A),
+    ("KEY_B", KeyCode::KEY_B),
+    ("KEY_C", KeyCode::KEY_C),
+    ("KEY_D", KeyCode::KEY_D),
+    ("KEY_E", KeyCode::KEY_E),
+    ("KEY_F", KeyCode::KEY_F),
+    ("KEY_G", KeyCode::KEY_G),
+    ("KEY_H", KeyCode::KEY_H),
+    ("KEY_I", KeyCode::KEY_I),
+    ("KEY_J", KeyCode::KEY_J),
+    ("KEY_K", KeyCode::KEY_K),
+    ("KEY_L", KeyCode::KEY_L),
+    ("KEY_M", KeyCode::KEY_M),
+    ("KEY_N", KeyCode::KEY_N),
+    ("KEY_O", KeyCode::KEY_O),
+    ("KEY_P", KeyCode::KEY_P),
+    ("KEY_Q", KeyCode::KEY_Q),
+    ("KEY_R", KeyCode::KEY_R),
+    ("KEY_S", KeyCode::KEY_S),
+    ("KEY_T", KeyCode::KEY_T),
+    ("KEY_U", KeyCode::KEY_U),
+    ("KEY_V", KeyCode::KEY_V),
+    ("KEY_W", KeyCode::KEY_W),
+    ("KEY_X", KeyCode::KEY_X),
+    ("KEY_Y", KeyCode::KEY_Y),
+    ("KEY_Z", KeyCode::KEY_Z),
     // Numbers row
-    ("KEY_0", Key::KEY_0),
-    ("KEY_1", Key::KEY_1),
-    ("KEY_2", Key::KEY_2),
-    ("KEY_3", Key::KEY_3),
-    ("KEY_4", Key::KEY_4),
-    ("KEY_5", Key::KEY_5),
-    ("KEY_6", Key::KEY_6),
-    ("KEY_7", Key::KEY_7),
-    ("KEY_8", Key::KEY_8),
-    ("KEY_9", Key::KEY_9),
+    ("KEY_0", KeyCode::KEY_0),
+    ("KEY_1", KeyCode::KEY_1),
+    ("KEY_2", KeyCode::KEY_2),
+    ("KEY_3", KeyCode::KEY_3),
+    ("KEY_4", KeyCode::KEY_4),
+    ("KEY_5", KeyCode::KEY_5),
+    ("KEY_6", KeyCode::KEY_6),
+    ("KEY_7", KeyCode::KEY_7),
+    ("KEY_8", KeyCode::KEY_8),
+    ("KEY_9", KeyCode::KEY_9),
     // Function keys
-    ("KEY_F1", Key::KEY_F1),
-    ("KEY_F2", Key::KEY_F2),
-    ("KEY_F3", Key::KEY_F3),
-    ("KEY_F4", Key::KEY_F4),
-    ("KEY_F5", Key::KEY_F5),
-    ("KEY_F6", Key::KEY_F6),
-    ("KEY_F7", Key::KEY_F7),
-    ("KEY_F8", Key::KEY_F8),
-    ("KEY_F9", Key::KEY_F9),
-    ("KEY_F10", Key::KEY_F10),
-    ("KEY_F11", Key::KEY_F11),
-    ("KEY_F12", Key::KEY_F12),
+    ("KEY_F1", KeyCode::KEY_F1),
+    ("KEY_F2", KeyCode::KEY_F2),
+    ("KEY_F3", KeyCode::KEY_F3),
+    ("KEY_F4", KeyCode::KEY_F4),
+    ("KEY_F5", KeyCode::KEY_F5),
+    ("KEY_F6", KeyCode::KEY_F6),
+    ("KEY_F7", KeyCode::KEY_F7),
+    ("KEY_F8", KeyCode::KEY_F8),
+    ("KEY_F9", KeyCode::KEY_F9),
+    ("KEY_F10", KeyCode::KEY_F10),
+    ("KEY_F11", KeyCode::KEY_F11),
+    ("KEY_F12", KeyCode::KEY_F12),
     // Modifiers and whitespace
-    ("KEY_LEFTCTRL", Key::KEY_LEFTCTRL),
-    ("KEY_RIGHTCTRL", Key::KEY_RIGHTCTRL),
-    ("KEY_LEFTSHIFT", Key::KEY_LEFTSHIFT),
-    ("KEY_RIGHTSHIFT", Key::KEY_RIGHTSHIFT),
-    ("KEY_LEFTALT", Key::KEY_LEFTALT),
-    ("KEY_RIGHTALT", Key::KEY_RIGHTALT),
-    ("KEY_LEFTMETA", Key::KEY_LEFTMETA),
-    ("KEY_RIGHTMETA", Key::KEY_RIGHTMETA),
-    ("KEY_CAPSLOCK", Key::KEY_CAPSLOCK),
-    ("KEY_TAB", Key::KEY_TAB),
-    ("KEY_SPACE", Key::KEY_SPACE),
-    ("KEY_ENTER", Key::KEY_ENTER),
-    ("KEY_ESC", Key::KEY_ESC),
-    ("KEY_BACKSPACE", Key::KEY_BACKSPACE),
+    ("KEY_LEFTCTRL", KeyCode::KEY_LEFTCTRL),
+    ("KEY_RIGHTCTRL", KeyCode::KEY_RIGHTCTRL),
+    ("KEY_LEFTSHIFT", KeyCode::KEY_LEFTSHIFT),
+    ("KEY_RIGHTSHIFT", KeyCode::KEY_RIGHTSHIFT),
+    ("KEY_LEFTALT", KeyCode::KEY_LEFTALT),
+    ("KEY_RIGHTALT", KeyCode::KEY_RIGHTALT),
+    ("KEY_LEFTMETA", KeyCode::KEY_LEFTMETA),
+    ("KEY_RIGHTMETA", KeyCode::KEY_RIGHTMETA),
+    ("KEY_CAPSLOCK", KeyCode::KEY_CAPSLOCK),
+    ("KEY_TAB", KeyCode::KEY_TAB),
+    ("KEY_SPACE", KeyCode::KEY_SPACE),
+    ("KEY_ENTER", KeyCode::KEY_ENTER),
+    ("KEY_ESC", KeyCode::KEY_ESC),
+    ("KEY_BACKSPACE", KeyCode::KEY_BACKSPACE),
     // Navigation
-    ("KEY_UP", Key::KEY_UP),
-    ("KEY_DOWN", Key::KEY_DOWN),
-    ("KEY_LEFT", Key::KEY_LEFT),
-    ("KEY_RIGHT", Key::KEY_RIGHT),
-    ("KEY_HOME", Key::KEY_HOME),
-    ("KEY_END", Key::KEY_END),
-    ("KEY_PAGEUP", Key::KEY_PAGEUP),
-    ("KEY_PAGEDOWN", Key::KEY_PAGEDOWN),
-    ("KEY_INSERT", Key::KEY_INSERT),
-    ("KEY_DELETE", Key::KEY_DELETE),
+    ("KEY_UP", KeyCode::KEY_UP),
+    ("KEY_DOWN", KeyCode::KEY_DOWN),
+    ("KEY_LEFT", KeyCode::KEY_LEFT),
+    ("KEY_RIGHT", KeyCode::KEY_RIGHT),
+    ("KEY_HOME", KeyCode::KEY_HOME),
+    ("KEY_END", KeyCode::KEY_END),
+    ("KEY_PAGEUP", KeyCode::KEY_PAGEUP),
+    ("KEY_PAGEDOWN", KeyCode::KEY_PAGEDOWN),
+    ("KEY_INSERT", KeyCode::KEY_INSERT),
+    ("KEY_DELETE", KeyCode::KEY_DELETE),
     // Punctuation
-    ("KEY_MINUS", Key::KEY_MINUS),
-    ("KEY_EQUAL", Key::KEY_EQUAL),
-    ("KEY_LEFTBRACE", Key::KEY_LEFTBRACE),
-    ("KEY_RIGHTBRACE", Key::KEY_RIGHTBRACE),
-    ("KEY_BACKSLASH", Key::KEY_BACKSLASH),
-    ("KEY_SEMICOLON", Key::KEY_SEMICOLON),
-    ("KEY_APOSTROPHE", Key::KEY_APOSTROPHE),
-    ("KEY_GRAVE", Key::KEY_GRAVE),
-    ("KEY_COMMA", Key::KEY_COMMA),
-    ("KEY_DOT", Key::KEY_DOT),
-    ("KEY_SLASH", Key::KEY_SLASH),
+    ("KEY_MINUS", KeyCode::KEY_MINUS),
+    ("KEY_EQUAL", KeyCode::KEY_EQUAL),
+    ("KEY_LEFTBRACE", KeyCode::KEY_LEFTBRACE),
+    ("KEY_RIGHTBRACE", KeyCode::KEY_RIGHTBRACE),
+    ("KEY_BACKSLASH", KeyCode::KEY_BACKSLASH),
+    ("KEY_SEMICOLON", KeyCode::KEY_SEMICOLON),
+    ("KEY_APOSTROPHE", KeyCode::KEY_APOSTROPHE),
+    ("KEY_GRAVE", KeyCode::KEY_GRAVE),
+    ("KEY_COMMA", KeyCode::KEY_COMMA),
+    ("KEY_DOT", KeyCode::KEY_DOT),
+    ("KEY_SLASH", KeyCode::KEY_SLASH),
     // Numpad
-    ("KEY_NUMLOCK", Key::KEY_NUMLOCK),
-    ("KEY_KPSLASH", Key::KEY_KPSLASH),
-    ("KEY_KPASTERISK", Key::KEY_KPASTERISK),
-    ("KEY_KPMINUS", Key::KEY_KPMINUS),
-    ("KEY_KPPLUS", Key::KEY_KPPLUS),
-    ("KEY_KPENTER", Key::KEY_KPENTER),
-    ("KEY_KP0", Key::KEY_KP0),
-    ("KEY_KP1", Key::KEY_KP1),
-    ("KEY_KP2", Key::KEY_KP2),
-    ("KEY_KP3", Key::KEY_KP3),
-    ("KEY_KP4", Key::KEY_KP4),
-    ("KEY_KP5", Key::KEY_KP5),
-    ("KEY_KP6", Key::KEY_KP6),
-    ("KEY_KP7", Key::KEY_KP7),
-    ("KEY_KP8", Key::KEY_KP8),
-    ("KEY_KP9", Key::KEY_KP9),
-    ("KEY_KPDOT", Key::KEY_KPDOT),
+    ("KEY_NUMLOCK", KeyCode::KEY_NUMLOCK),
+    ("KEY_KPSLASH", KeyCode::KEY_KPSLASH),
+    ("KEY_KPASTERISK", KeyCode::KEY_KPASTERISK),
+    ("KEY_KPMINUS", KeyCode::KEY_KPMINUS),
+    ("KEY_KPPLUS", KeyCode::KEY_KPPLUS),
+    ("KEY_KPENTER", KeyCode::KEY_KPENTER),
+    ("KEY_KP0", KeyCode::KEY_KP0),
+    ("KEY_KP1", KeyCode::KEY_KP1),
+    ("KEY_KP2", KeyCode::KEY_KP2),
+    ("KEY_KP3", KeyCode::KEY_KP3),
+    ("KEY_KP4", KeyCode::KEY_KP4),
+    ("KEY_KP5", KeyCode::KEY_KP5),
+    ("KEY_KP6", KeyCode::KEY_KP6),
+    ("KEY_KP7", KeyCode::KEY_KP7),
+    ("KEY_KP8", KeyCode::KEY_KP8),
+    ("KEY_KP9", KeyCode::KEY_KP9),
+    ("KEY_KPDOT", KeyCode::KEY_KPDOT),
     // Media
-    ("KEY_MUTE", Key::KEY_MUTE),
-    ("KEY_VOLUMEDOWN", Key::KEY_VOLUMEDOWN),
-    ("KEY_VOLUMEUP", Key::KEY_VOLUMEUP),
-    ("KEY_PLAYPAUSE", Key::KEY_PLAYPAUSE),
-    ("KEY_NEXTSONG", Key::KEY_NEXTSONG),
-    ("KEY_PREVIOUSSONG", Key::KEY_PREVIOUSSONG),
-    ("KEY_STOPCD", Key::KEY_STOPCD),
+    ("KEY_MUTE", KeyCode::KEY_MUTE),
+    ("KEY_VOLUMEDOWN", KeyCode::KEY_VOLUMEDOWN),
+    ("KEY_VOLUMEUP", KeyCode::KEY_VOLUMEUP),
+    ("KEY_PLAYPAUSE", KeyCode::KEY_PLAYPAUSE),
+    ("KEY_NEXTSONG", KeyCode::KEY_NEXTSONG),
+    ("KEY_PREVIOUSSONG", KeyCode::KEY_PREVIOUSSONG),
+    ("KEY_STOPCD", KeyCode::KEY_STOPCD),
 ];
 
 /// How the mic is toggled: by absolute volume level or by mute state.
@@ -160,7 +160,7 @@ enum StartupState {
 #[derive(Clone, Debug)]
 struct Config {
     /// Keys that must be held simultaneously to activate the mic.
-    keys: Vec<Key>,
+    keys: Vec<KeyCode>,
     /// Optional explicit input device path (e.g. /dev/input/event7).
     device_path: Option<PathBuf>,
     /// Volume vs mute behavior.
@@ -217,13 +217,13 @@ fn set_mute(muted: bool) -> Result<()> {
 fn play_sound_file(path: PathBuf) {
     // Best-effort: play in a background thread to avoid blocking input handling.
     std::thread::spawn(move || {
-        if let Ok((_stream, handle)) = OutputStream::try_default() {
+        if let Ok(mut stream) = OutputStreamBuilder::open_default_stream() {
+            stream.log_on_drop(false);
             if let Ok(file) = File::open(&path) {
                 if let Ok(decoder) = Decoder::new(BufReader::new(file)) {
-                    if let Ok(sink) = Sink::try_new(&handle) {
-                        sink.append(decoder);
-                        sink.sleep_until_end();
-                    }
+                    let sink = Sink::connect_new(stream.mixer());
+                    sink.append(decoder);
+                    sink.sleep_until_end();
                 }
             }
         }
@@ -309,11 +309,11 @@ fn apply_off(config: &Config) -> Result<()> {
     }
 }
 
-/// Parse a single key identifier (name or numeric evdev code) into a Key.
-fn parse_key(input: &str) -> Result<Key> {
+/// Parse a single key identifier (name or numeric evdev code) into a KeyCode.
+fn parse_key(input: &str) -> Result<KeyCode> {
     let normalized = input.trim().to_ascii_uppercase();
     if let Ok(code) = normalized.parse::<u16>() {
-        return Ok(Key::new(code));
+        return Ok(KeyCode::new(code));
     }
 
     for (name, key) in SUPPORTED_KEYS {
@@ -328,7 +328,7 @@ fn parse_key(input: &str) -> Result<Key> {
 }
 
 /// Parse a + separated key chord (e.g. KEY_LEFTCTRL+KEY_F).
-fn parse_keys(input: &str) -> Result<Vec<Key>> {
+fn parse_keys(input: &str) -> Result<Vec<KeyCode>> {
     input
         .split('+')
         .map(|part| parse_key(part.trim()))
@@ -382,7 +382,7 @@ fn print_devices() -> Result<()> {
     Ok(())
 }
 
-fn key_label(key: Key) -> String {
+fn key_label(key: KeyCode) -> String {
     for (name, k) in SUPPORTED_KEYS {
         if *k == key {
             return (*name).to_string();
@@ -438,7 +438,7 @@ fn print_config(config: &Config) {
 
 /// Parse CLI arguments into runtime configuration.
 fn parse_args() -> Result<Config> {
-    let mut keys: Vec<Key> = vec![Key::BTN_EXTRA];
+    let mut keys: Vec<KeyCode> = vec![KeyCode::BTN_EXTRA];
     let mut device_path = None;
     let mut mode = Mode::Volume;
     let mut on_level = 1.0;
@@ -464,7 +464,7 @@ fn parse_args() -> Result<Config> {
                 i += 1;
                 let value = args.get(i).context("missing value for --key")?;
                 let mut parsed = parse_keys(value)?;
-                if keys.len() == 1 && keys[0] == Key::BTN_EXTRA {
+                if keys.len() == 1 && keys[0] == KeyCode::BTN_EXTRA {
                     keys.clear();
                 }
                 keys.append(&mut parsed);
@@ -642,7 +642,7 @@ fn set_active_state(config: &Config, active: &mut bool, on: bool) -> Result<()> 
     Ok(())
 }
 
-fn update_pressed_keys(pressed: &mut HashSet<Key>, key: Key, value: i32) {
+fn update_pressed_keys(pressed: &mut HashSet<KeyCode>, key: KeyCode, value: i32) {
     match value {
         1 => {
             pressed.insert(key);
@@ -656,7 +656,7 @@ fn update_pressed_keys(pressed: &mut HashSet<Key>, key: Key, value: i32) {
 
 fn refresh_active_state(
     config: &Config,
-    pressed: &HashSet<Key>,
+    pressed: &HashSet<KeyCode>,
     active: &mut bool,
 ) -> Result<()> {
     let all_pressed = config.keys.iter().all(|k| pressed.contains(k));
@@ -669,14 +669,14 @@ fn refresh_active_state(
 fn handle_events(
     config: &Config,
     device: &mut Device,
-    pressed: &mut HashSet<Key>,
+    pressed: &mut HashSet<KeyCode>,
     active: &mut bool,
 ) -> Result<Option<std::io::Error>> {
     let fetch_error = match device.fetch_events() {
         Ok(events) => {
             for ev in events {
-                if let InputEventKind::Key(key) = ev.kind() {
-                    update_pressed_keys(pressed, key, ev.value());
+                if let EventSummary::Key(_, key, value) = ev.destructure() {
+                    update_pressed_keys(pressed, key, value);
                     refresh_active_state(config, pressed, active)?;
                 }
             }
@@ -762,7 +762,7 @@ fn main() -> Result<()> {
 
     println!("🎙 Hold the configured button to talk");
 
-    let mut pressed: HashSet<Key> = HashSet::new();
+    let mut pressed: HashSet<KeyCode> = HashSet::new();
     let mut active = false;
 
     while running.load(Ordering::SeqCst) {
