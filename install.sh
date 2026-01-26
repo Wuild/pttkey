@@ -11,8 +11,14 @@ UDEV_RULE_DEST="/etc/udev/rules.d/99-ptt-input.rules"
 
 mkdir -p "${BIN_DIR}" "${SERVICE_DIR}"
 
-cargo build --release
-install -m 755 "${ROOT_DIR}/target/release/pttkey" "${BIN_PATH}"
+if [[ -x "${ROOT_DIR}/pttkey" ]]; then
+    install -m 755 "${ROOT_DIR}/pttkey" "${BIN_PATH}"
+elif [[ -x "${ROOT_DIR}/target/release/pttkey" ]]; then
+    install -m 755 "${ROOT_DIR}/target/release/pttkey" "${BIN_PATH}"
+else
+    cargo build --release
+    install -m 755 "${ROOT_DIR}/target/release/pttkey" "${BIN_PATH}"
+fi
 
 cat > "${SERVICE_PATH}" <<EOF
 [Unit]

@@ -26,7 +26,7 @@ jobs:
         run: |
           mkdir -p dist
           cp target/release/pttkey dist/
-          cp pttkey.service 99-ptt-input.rules install.sh README.md dist/
+          cp pttkey.service 99-ptt-input.rules install.sh README.md Cargo.toml LICENSE dist/
           tar -czf pttkey-linux-x86_64.tar.gz -C dist .
 
       - name: Verify package
