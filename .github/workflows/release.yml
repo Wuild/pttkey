@@ -15,6 +15,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+
       - name: Build
         run: cargo build --release
 
