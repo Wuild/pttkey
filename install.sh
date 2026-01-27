@@ -27,7 +27,8 @@ After=pipewire.service pipewire-pulse.service
 
 [Service]
 Type=simple
-ExecStart=${BIN_PATH}
+ExecStart=%h/.local/bin/pttkey
+# Config: ~/.config/pttkey/config.toml (CLI updates and restarts)
 Restart=on-failure
 RestartSec=1
 

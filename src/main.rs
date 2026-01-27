@@ -2,18 +2,27 @@
 
 use anyhow::{bail, Context, Result};
 use evdev::{Device, EventSummary, KeyCode};
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::env;
+use std::fs;
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Cursor};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use rodio::{Decoder, OutputStreamBuilder, Sink};
 
 const DEFAULT_SOUND_ON_EVENT: &str = "audio-volume-change";
 const DEFAULT_SOUND_OFF_EVENT: &str = "audio-volume-muted";
+const DEFAULT_SOUND_ON_WAV: &[u8] = include_bytes!("../unmute.wav");
+const DEFAULT_SOUND_OFF_WAV: &[u8] = include_bytes!("../mute.wav");
+
+const CONFIG_FILE_NAME: &str = "config.toml";
+const CONFIG_DIR_NAME: &str = "pttkey";
+const CONFIG_BACKUP_NAME: &str = ".pttkey-config.toml";
 
 macro_rules! key_map {
     ($($key:ident),+ $(,)?) => {
@@ -85,6 +94,18 @@ const SUPPORTED_KEYS: &[(&str, KeyCode)] = key_map![
     KEY_F10,
     KEY_F11,
     KEY_F12,
+    KEY_F13,
+    KEY_F14,
+    KEY_F15,
+    KEY_F16,
+    KEY_F17,
+    KEY_F18,
+    KEY_F19,
+    KEY_F20,
+    KEY_F21,
+    KEY_F22,
+    KEY_F23,
+    KEY_F24,
     // Modifiers and whitespace,
     KEY_LEFTCTRL,
     KEY_RIGHTCTRL,
@@ -194,16 +215,144 @@ struct Config {
     dry_run: bool,
     /// Startup mic state.
     startup_state: StartupState,
+    /// Reverse behavior so holding keys mutes instead of unmutes.
+    reverse: bool,
+}
+
+/// Config data persisted to disk.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+struct PersistedConfig {
+    keys: Vec<String>,
+    device_path: Option<String>,
+    mode: String,
+    on_level: f32,
+    off_level: f32,
+    sounds: bool,
+    sound_on: Option<String>,
+    sound_off: Option<String>,
+    startup_state: String,
+    reverse: bool,
+}
+
+impl Default for PersistedConfig {
+    fn default() -> Self {
+        Self {
+            keys: vec!["BTN_EXTRA".to_string()],
+            device_path: None,
+            mode: "volume".to_string(),
+            on_level: 1.0,
+            off_level: 0.0,
+            sounds: true,
+            sound_on: None,
+            sound_off: None,
+            startup_state: "muted".to_string(),
+            reverse: false,
+        }
+    }
+}
+
+fn config_dir() -> Result<PathBuf> {
+    if let Ok(path) = env::var("XDG_CONFIG_HOME") {
+        return Ok(PathBuf::from(path).join(CONFIG_DIR_NAME));
+    }
+    let home = env::var("HOME").context("HOME not set")?;
+    Ok(PathBuf::from(home).join(".config").join(CONFIG_DIR_NAME))
+}
+
+fn config_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join(CONFIG_FILE_NAME))
+}
+
+fn backup_config_path() -> Result<PathBuf> {
+    let home = env::var("HOME").context("HOME not set")?;
+    Ok(PathBuf::from(home).join(CONFIG_BACKUP_NAME))
+}
+
+fn read_persisted_config(path: &Path) -> Result<PersistedConfig> {
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read config {}", path.display()))?;
+    toml::from_str(&contents)
+        .with_context(|| format!("Failed to parse config {}", path.display()))
+}
+
+fn write_persisted_config(
+    config: &PersistedConfig,
+    primary: &Path,
+    backup: &Path,
+) -> Result<()> {
+    let contents = toml::to_string_pretty(config).context("Failed to serialize config")?;
+    if let Some(parent) = primary.parent() {
+        if let Err(err) = fs::create_dir_all(parent) {
+            eprintln!(
+                "Warning: failed to create config directory {}: {err}",
+                parent.display()
+            );
+        }
+    }
+
+    let mut wrote_primary = false;
+    if fs::write(primary, &contents).is_ok() {
+        wrote_primary = true;
+    } else {
+        eprintln!(
+            "Warning: failed to write config to {}, falling back to backup path",
+            primary.display()
+        );
+    }
+
+    if !wrote_primary {
+        fs::write(backup, &contents).with_context(|| {
+            format!(
+                "Failed to write backup config to {}",
+                backup.display()
+            )
+        })?;
+        return Ok(());
+    }
+
+    let _ = fs::write(backup, &contents);
+    Ok(())
+}
+
+fn load_persisted_config() -> Result<(PersistedConfig, bool, PathBuf)> {
+    let primary = config_path()?;
+    let backup = backup_config_path()?;
+
+    if primary.exists() {
+        return Ok((read_persisted_config(&primary)?, false, primary));
+    }
+    if backup.exists() {
+        return Ok((read_persisted_config(&backup)?, false, backup));
+    }
+
+    let config = PersistedConfig::default();
+    write_persisted_config(&config, &primary, &backup)?;
+    let used = if primary.exists() { primary } else { backup };
+    Ok((config, true, used))
+}
+
+fn restart_service() {
+    let status = Command::new("systemctl")
+        .args(["--user", "try-restart", "pttkey.service"])
+        .status();
+    match status {
+        Ok(status) if status.success() => {
+            println!("Restarted user service pttkey.service");
+        }
+        Ok(status) => {
+            eprintln!("Warning: failed to restart service (exit {})", status);
+        }
+        Err(err) => {
+            eprintln!("Warning: failed to invoke systemctl: {err}");
+        }
+    }
 }
 
 /// Set the default microphone volume to an absolute level.
 fn set_volume(level: f32) -> Result<()> {
     Command::new("wpctl")
-        .args([
-            "set-volume",
-            "@DEFAULT_SOURCE@",
-            &format!("{level}"),
-        ])
+        .args(["set-volume", "@DEFAULT_SOURCE@", &format!("{level}")])
         .status()
         .context("wpctl failed")?;
     Ok(())
@@ -237,6 +386,27 @@ fn play_sound_file(path: PathBuf) {
             }
         }
     });
+}
+
+fn try_play_embedded_sound(on: bool) -> bool {
+    let bytes = if on {
+        DEFAULT_SOUND_ON_WAV
+    } else {
+        DEFAULT_SOUND_OFF_WAV
+    };
+    let cursor = Cursor::new(bytes);
+    let Ok(decoder) = Decoder::new(cursor) else {
+        return false;
+    };
+    std::thread::spawn(move || {
+        if let Ok(mut stream) = OutputStreamBuilder::open_default_stream() {
+            stream.log_on_drop(false);
+            let sink = Sink::connect_new(stream.mixer());
+            sink.append(decoder);
+            sink.sleep_until_end();
+        }
+    });
+    true
 }
 
 fn find_bin(name: &str) -> Option<PathBuf> {
@@ -289,17 +459,99 @@ fn try_canberra(event: &str) -> bool {
 
 /// Play the system default sound effect for on/off (best-effort, async).
 fn play_default_sound(on: bool) {
-    let event = if on {
-        DEFAULT_SOUND_ON_EVENT
-    } else {
-        DEFAULT_SOUND_OFF_EVENT
-    };
     std::thread::spawn(move || {
+        if try_play_embedded_sound(on) {
+            return;
+        }
         if try_paplay(on) {
             return;
         }
+        let event = if on {
+            DEFAULT_SOUND_ON_EVENT
+        } else {
+            DEFAULT_SOUND_OFF_EVENT
+        };
         let _ = try_canberra(event);
     });
+}
+
+fn mode_label(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Volume => "volume",
+        Mode::Mute => "mute",
+    }
+}
+
+fn parse_mode(value: &str) -> Result<Mode> {
+    match value {
+        "volume" => Ok(Mode::Volume),
+        "mute" => Ok(Mode::Mute),
+        _ => bail!("Invalid --mode '{value}'. Use 'volume' or 'mute'."),
+    }
+}
+
+fn startup_state_label(state: StartupState) -> &'static str {
+    match state {
+        StartupState::Muted => "muted",
+        StartupState::Unmuted => "unmuted",
+    }
+}
+
+fn parse_startup_state(value: &str) -> Result<StartupState> {
+    match value {
+        "muted" => Ok(StartupState::Muted),
+        "unmuted" => Ok(StartupState::Unmuted),
+        _ => bail!("Invalid --startup-state '{value}'. Use 'muted' or 'unmuted'."),
+    }
+}
+
+fn persisted_from_config(config: &Config) -> PersistedConfig {
+    PersistedConfig {
+        keys: config.keys.iter().map(|k| key_label(*k)).collect(),
+        device_path: config
+            .device_path
+            .as_ref()
+            .map(|p| p.display().to_string()),
+        mode: mode_label(config.mode).to_string(),
+        on_level: config.on_level,
+        off_level: config.off_level,
+        sounds: config.sounds,
+        sound_on: config.sound_on.as_ref().map(|p| p.display().to_string()),
+        sound_off: config.sound_off.as_ref().map(|p| p.display().to_string()),
+        startup_state: startup_state_label(config.startup_state).to_string(),
+        reverse: config.reverse,
+    }
+}
+
+fn print_persisted_config(path: &Path, config: &PersistedConfig) {
+    let keys = if config.keys.is_empty() {
+        "BTN_EXTRA".to_string()
+    } else {
+        config.keys.join("+")
+    };
+    println!("config_path: {}", path.display());
+    println!("config_keys: {}", keys);
+    println!(
+        "config_device: {}",
+        config
+            .device_path
+            .as_deref()
+            .unwrap_or("auto")
+    );
+    println!("config_mode: {}", config.mode);
+    println!("config_reverse: {}", config.reverse);
+    println!("config_on_level: {}", config.on_level);
+    println!("config_off_level: {}", config.off_level);
+    println!("config_sounds: {}", config.sounds);
+    println!(
+        "config_sound_on: {}",
+        config.sound_on.as_deref().unwrap_or("default")
+    );
+    println!(
+        "config_sound_off: {}",
+        config.sound_off.as_deref().unwrap_or("default")
+    );
+    println!("config_startup_state: {}", config.startup_state);
 }
 
 /// Apply the "mic on" action according to the selected mode.
@@ -331,9 +583,7 @@ fn parse_key(input: &str) -> Result<KeyCode> {
         }
     }
 
-    bail!(
-        "Unknown key '{input}'. Use a numeric key code or a known name like BTN_EXTRA/KEY_F9."
-    )
+    bail!("Unknown key '{input}'. Use a numeric key code or a known name like BTN_EXTRA/KEY_F9.")
 }
 
 /// Parse a + separated key chord (e.g. KEY_LEFTCTRL+KEY_F).
@@ -355,6 +605,8 @@ Options:\n\
                       (e.g. --key KEY_LEFTCTRL+KEY_F or --key KEY_LEFTCTRL --key KEY_F)\n\
   --device <PATH>     use a specific input device (e.g. /dev/input/event7)\n\
   --mode <volume|mute>  toggle by volume level or set-mute (default: volume)\n\
+  --reverse           invert behavior so holding the key mutes\n\
+  --no-reverse        disable reverse behavior\n\
   --on-level <FLOAT>  volume level when pressed (default: 1.0)\n\
   --off-level <FLOAT> volume level when released (default: 0.0)\n\
   --sound-on <PATH>   custom sound file for mic on (mp3/wav/ogg)\n\
@@ -372,8 +624,12 @@ Examples:\n\
   pttkey --key BTN_EXTRA\n\
   pttkey --key KEY_F9 --mode mute --no-sounds\n\
   pttkey --key KEY_LEFTCTRL+KEY_F --mode mute\n\
+  pttkey --key KEY_F9 --reverse --startup-state unmuted\n\
   pttkey --sound-on ~/on.wav --sound-off ~/off.ogg\n\
-  pttkey --device /dev/input/event7 --key KEY_SPACE\n"
+  pttkey --device /dev/input/event7 --key KEY_SPACE\n\
+\n\
+Config:\n\
+  ~/.config/pttkey/config.toml (auto-created, CLI updates and restarts service)\n"
     );
 }
 
@@ -412,17 +668,12 @@ fn print_config(config: &Config) {
         .as_ref()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "auto".to_string());
-    let mode = match config.mode {
-        Mode::Volume => "volume",
-        Mode::Mute => "mute",
-    };
-    let startup_state = match config.startup_state {
-        StartupState::Muted => "muted",
-        StartupState::Unmuted => "unmuted",
-    };
+    let mode = mode_label(config.mode);
+    let startup_state = startup_state_label(config.startup_state);
     println!("keys: {keys}");
     println!("device: {device}");
     println!("mode: {mode}");
+    println!("reverse: {}", config.reverse);
     println!("on_level: {}", config.on_level);
     println!("off_level: {}", config.off_level);
     println!("sounds: {}", config.sounds);
@@ -446,20 +697,31 @@ fn print_config(config: &Config) {
 }
 
 /// Parse CLI arguments into runtime configuration.
-fn parse_args() -> Result<Config> {
-    let mut keys: Vec<KeyCode> = vec![KeyCode::BTN_EXTRA];
-    let mut device_path = None;
-    let mut mode = Mode::Volume;
-    let mut on_level = 1.0;
-    let mut off_level = 0.0;
-    let mut sounds = true;
-    let mut sound_on = None;
-    let mut sound_off = None;
+fn parse_args(base: PersistedConfig) -> Result<(Config, bool)> {
+    let mut keys: Vec<KeyCode> = base
+        .keys
+        .iter()
+        .map(|k| parse_key(k))
+        .collect::<Result<Vec<_>>>()?;
+    if keys.is_empty() {
+        keys.push(KeyCode::BTN_EXTRA);
+    }
+    let mut device_path = base.device_path.map(PathBuf::from);
+    let mut mode = parse_mode(&base.mode)?;
+    let mut reverse = base.reverse;
+    let mut on_level = base.on_level;
+    let mut off_level = base.off_level;
+    let mut sounds = base.sounds;
+    let mut sound_on = base.sound_on.map(PathBuf::from);
+    let mut sound_off = base.sound_off.map(PathBuf::from);
     let mut list_keys = false;
     let mut list_devices = false;
     let mut print_config = false;
     let mut dry_run = false;
-    let mut startup_state = StartupState::Muted;
+    let mut startup_state = parse_startup_state(&base.startup_state)?;
+    let mut startup_state_set = false;
+    let mut persist_changed = false;
+    let mut key_set = false;
 
     let args: Vec<String> = env::args().skip(1).collect();
     let mut i = 0;
@@ -473,24 +735,32 @@ fn parse_args() -> Result<Config> {
                 i += 1;
                 let value = args.get(i).context("missing value for --key")?;
                 let mut parsed = parse_keys(value)?;
-                if keys.len() == 1 && keys[0] == KeyCode::BTN_EXTRA {
+                if !key_set {
                     keys.clear();
+                    key_set = true;
                 }
                 keys.append(&mut parsed);
+                persist_changed = true;
             }
             "--device" => {
                 i += 1;
                 let value = args.get(i).context("missing value for --device")?;
                 device_path = Some(PathBuf::from(value));
+                persist_changed = true;
             }
             "--mode" => {
                 i += 1;
                 let value = args.get(i).context("missing value for --mode")?;
-                mode = match value.as_str() {
-                    "volume" => Mode::Volume,
-                    "mute" => Mode::Mute,
-                    _ => bail!("Invalid --mode '{value}'. Use 'volume' or 'mute'."),
-                };
+                mode = parse_mode(value)?;
+                persist_changed = true;
+            }
+            "--reverse" => {
+                reverse = true;
+                persist_changed = true;
+            }
+            "--no-reverse" => {
+                reverse = false;
+                persist_changed = true;
             }
             "--on-level" => {
                 i += 1;
@@ -498,6 +768,7 @@ fn parse_args() -> Result<Config> {
                 on_level = value
                     .parse::<f32>()
                     .with_context(|| format!("invalid --on-level '{value}'"))?;
+                persist_changed = true;
             }
             "--off-level" => {
                 i += 1;
@@ -505,33 +776,34 @@ fn parse_args() -> Result<Config> {
                 off_level = value
                     .parse::<f32>()
                     .with_context(|| format!("invalid --off-level '{value}'"))?;
+                persist_changed = true;
             }
             "--sound-on" => {
                 i += 1;
                 let value = args.get(i).context("missing value for --sound-on")?;
                 sound_on = Some(PathBuf::from(value));
+                persist_changed = true;
             }
             "--sound-off" => {
                 i += 1;
                 let value = args.get(i).context("missing value for --sound-off")?;
                 sound_off = Some(PathBuf::from(value));
+                persist_changed = true;
             }
             "--startup-state" => {
                 i += 1;
                 let value = args.get(i).context("missing value for --startup-state")?;
-                startup_state = match value.as_str() {
-                    "muted" => StartupState::Muted,
-                    "unmuted" => StartupState::Unmuted,
-                    _ => bail!(
-                        "Invalid --startup-state '{value}'. Use 'muted' or 'unmuted'."
-                    ),
-                };
+                startup_state = parse_startup_state(value)?;
+                startup_state_set = true;
+                persist_changed = true;
             }
             "--sounds" => {
                 sounds = true;
+                persist_changed = true;
             }
             "--no-sounds" => {
                 sounds = false;
+                persist_changed = true;
             }
             "--list-keys" => {
                 list_keys = true;
@@ -561,28 +833,36 @@ fn parse_args() -> Result<Config> {
         }
     }
 
-    Ok(Config {
-        keys,
-        device_path,
-        mode,
-        on_level,
-        off_level,
-        sounds,
-        sound_on,
-        sound_off,
-        list_keys,
-        list_devices,
-        print_config,
-        dry_run,
-        startup_state,
-    })
+    if reverse && !startup_state_set {
+        startup_state = StartupState::Unmuted;
+    }
+
+    Ok((
+        Config {
+            keys,
+            device_path,
+            mode,
+            reverse,
+            on_level,
+            off_level,
+            sounds,
+            sound_on,
+            sound_off,
+            list_keys,
+            list_devices,
+            print_config,
+            dry_run,
+            startup_state,
+        },
+        persist_changed,
+    ))
 }
 
 /// Open the input device, using an explicit path or by probing available devices.
 fn open_device(config: &Config) -> Result<Device> {
     if let Some(path) = &config.device_path {
-        let device =
-            Device::open(path).with_context(|| format!("Failed to open device {}", path.display()))?;
+        let device = Device::open(path)
+            .with_context(|| format!("Failed to open device {}", path.display()))?;
         if let Some(keys) = device.supported_keys() {
             for key in &config.keys {
                 if !keys.contains(*key) {
@@ -669,8 +949,9 @@ fn refresh_active_state(
     active: &mut bool,
 ) -> Result<()> {
     let all_pressed = config.keys.iter().all(|k| pressed.contains(k));
-    if all_pressed != *active {
-        set_active_state(config, active, all_pressed)?;
+    let desired_on = if config.reverse { !all_pressed } else { all_pressed };
+    if desired_on != *active {
+        set_active_state(config, active, desired_on)?;
     }
     Ok(())
 }
@@ -728,7 +1009,17 @@ fn reopen_device_loop(config: &Config) -> Result<Device> {
 }
 
 fn main() -> Result<()> {
-    let config = parse_args()?;
+    let (base_config, _created, config_path_used) = load_persisted_config()?;
+    print_persisted_config(&config_path_used, &base_config);
+    let (config, persist_changed) = parse_args(base_config)?;
+    if persist_changed {
+        let persisted = persisted_from_config(&config);
+        let primary = config_path()?;
+        let backup = backup_config_path()?;
+        write_persisted_config(&persisted, &primary, &backup)?;
+        restart_service();
+        return Ok(());
+    }
 
     if config.list_keys {
         print_supported_keys();
@@ -765,14 +1056,20 @@ fn main() -> Result<()> {
     ctrlc::set_handler(move || {
         r.store(false, Ordering::SeqCst);
     })
-        .expect("Failed to set Ctrl-C handler");
+    .expect("Failed to set Ctrl-C handler");
 
     let mut device = open_device_with_hint(&config)?;
 
-    println!("🎙 Hold the configured button to talk");
+    if config.reverse {
+        println!("🎙 Hold the configured button to mute");
+    } else {
+        println!("🎙 Hold the configured button to talk");
+    }
 
     let mut pressed: HashSet<KeyCode> = HashSet::new();
     let mut active = false;
+
+    refresh_active_state(&config, &pressed, &mut active)?;
 
     while running.load(Ordering::SeqCst) {
         if let Some(err) = handle_events(&config, &mut device, &mut pressed, &mut active)? {

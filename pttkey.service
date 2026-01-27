@@ -4,9 +4,8 @@ After=pipewire.service pipewire-pulse.service
 
 [Service]
 Type=simple
-ExecStart=~/.local/bin/pttkey
-# Example:
-# ExecStart=~/.local/bin/pttkey --key KEY_F9 --mode mute --no-sounds
+ExecStart=%h/.local/bin/pttkey
+# Config: ~/.config/pttkey/config.toml (CLI updates and restarts)
 Restart=on-failure
 RestartSec=1
 

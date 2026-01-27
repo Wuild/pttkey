@@ -27,6 +27,13 @@ pttkey --list-devices
 pttkey --list-keys
 ```
 
+## Config
+
+On first run, a config file is created at `~/.config/pttkey/config.toml`.
+CLI flags update the config and trigger a user service restart.
+If the config directory cannot be written, a backup is stored at
+`~/.pttkey-config.toml`.
+
 ### Options
 
 | Argument | Meaning | Default / Notes |
@@ -34,6 +41,8 @@ pttkey --list-keys
 | `--key <NAME\|CODE>` | Evdev key name or numeric code. Can be repeated or combined with `+` for chords (e.g. `--key KEY_LEFTCTRL+KEY_F`). | Default: `BTN_EXTRA` |
 | `--device <PATH>` | Input device path to use instead of auto-detect. | Optional |
 | `--mode <volume\|mute>` | Control by volume level or `set-mute`. | Default: `volume` |
+| `--reverse` | Invert behavior so holding the key mutes. | Optional |
+| `--no-reverse` | Disable reverse behavior (normal push-to-talk). | Optional |
 | `--on-level <FLOAT>` | Volume when pressed. | Default: `1.0` |
 | `--off-level <FLOAT>` | Volume when released. | Default: `0.0` |
 | `--sound-on <PATH>` | Custom sound file for mic on (`mp3`, `wav`, `ogg`). | Optional |
@@ -101,7 +110,7 @@ sudo udevadm control --reload-rules
 sudo udevadm trigger
 ```
 
-- Default sounds are played via `paplay` (preferred) or `canberra-gtk-play` when available.
+- Default sounds are bundled (`mute.wav`/`unmute.wav`); if they fail to play, `paplay` or `canberra-gtk-play` is used as fallback.
 
 - Stop the service with:
 

@@ -1,6 +1,6 @@
 [package]
 name = "pttkey"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 
 [dependencies]
@@ -9,3 +9,5 @@ anyhow = "1.0"
 which = "8.0.0"
 ctrlc = "3.5.1"
 rodio = { version = "0.21.1", default-features = false, features = ["mp3", "wav", "vorbis", "playback"] }
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
