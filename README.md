@@ -22,6 +22,8 @@ pttkey --key BTN_EXTRA
 pttkey --key KEY_F9 --mode mute --no-sounds
 pttkey --key KEY_LEFTCTRL+KEY_F --mode mute
 pttkey --sound-on ~/on.wav --sound-off ~/off.ogg
+pttkey --sound-on ~/on.wav --sound-volume 0.5
+pttkey --sound-on false --sound-volume 0.3
 pttkey --device /dev/input/event7 --key KEY_SPACE
 pttkey --list-devices
 pttkey --list-keys
@@ -33,6 +35,7 @@ On first run, a config file is created at `~/.config/pttkey/config.toml`.
 CLI flags update the config and trigger a user service restart.
 If the config directory cannot be written, a backup is stored at
 `~/.pttkey-config.toml`.
+The app reloads the config automatically when the file changes.
 
 ### Options
 
@@ -45,8 +48,9 @@ If the config directory cannot be written, a backup is stored at
 | `--no-reverse` | Disable reverse behavior (normal push-to-talk). | Optional |
 | `--on-level <FLOAT>` | Volume when pressed. | Default: `1.0` |
 | `--off-level <FLOAT>` | Volume when released. | Default: `0.0` |
-| `--sound-on <PATH>` | Custom sound file for mic on (`mp3`, `wav`, `ogg`). | Optional |
-| `--sound-off <PATH>` | Custom sound file for mic off (`mp3`, `wav`, `ogg`). | Optional |
+| `--sound-on <PATH>` | Custom sound file for mic on (`mp3`, `wav`, `ogg`) or `false` to disable. | Optional |
+| `--sound-off <PATH>` | Custom sound file for mic off (`mp3`, `wav`, `ogg`) or `false` to disable. | Optional |
+| `--sound-volume <FLOAT>` | Volume for sounds. | Default: `1.0` |
 | `--startup-state <muted\|unmuted>` | Initial mic state. | Default: `muted` |
 | `--sounds` | Enable on/off sounds using system default sounds. | Enabled by default |
 | `--no-sounds` | Disable on/off sounds. | Overrides `--sounds` |

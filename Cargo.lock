@@ -598,11 +598,12 @@ dependencies = [
 
 [[package]]
 name = "pttkey"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "ctrlc",
  "evdev",
+ "libc",
  "rodio",
  "serde",
  "toml",
