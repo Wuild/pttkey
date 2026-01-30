@@ -27,15 +27,15 @@ fn get_audio_sender() -> Option<&'static Sender<PlayRequest>> {
         let (tx, rx) = mpsc::channel::<PlayRequest>();
         let _ = AUDIO_SENDER.set(tx);
         std::thread::spawn(move || {
-            let Ok(mut stream) = OutputStreamBuilder::open_default_stream() else {
-                return;
-            };
-            stream.log_on_drop(false);
             for request in rx {
+                let Ok(mut stream) = OutputStreamBuilder::open_default_stream() else {
+                    continue;
+                };
+                stream.log_on_drop(false);
                 let sink = Sink::connect_new(stream.mixer());
                 sink.set_volume(request.volume);
                 sink.append(request.samples);
-                sink.detach();
+                sink.sleep_until_end();
             }
         });
     }

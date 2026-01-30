@@ -7,6 +7,7 @@ unmute the default microphone source via `wpctl`.
 
 - Linux with PipeWire and `wpctl` available in PATH
 - An input device (mouse or keyboard) with a usable key/button
+- For `--suppress`, access to `/dev/uinput` (uinput kernel module + permissions)
 - Rust toolchain (for building)
 
 ## Build
@@ -25,6 +26,7 @@ pttkey --sound-on ~/on.wav --sound-off ~/off.ogg
 pttkey --sound-on ~/on.wav --sound-volume 0.5
 pttkey --sound-on false --sound-volume 0.3
 pttkey --device /dev/input/event7 --key KEY_SPACE
+pttkey --key KEY_F9 --suppress
 pttkey --list-devices
 pttkey --list-keys
 ```
@@ -54,6 +56,8 @@ The app reloads the config automatically when the file changes.
 | `--startup-state <muted\|unmuted>` | Initial mic state. | Default: `muted` |
 | `--sounds` | Enable on/off sounds using system default sounds. | Enabled by default |
 | `--no-sounds` | Disable on/off sounds. | Overrides `--sounds` |
+| `--suppress` | Suppress only the configured key(s) from reaching other apps by re-emitting other events. | Optional |
+| `--no-suppress` | Do not suppress key events. | Default |
 | `--list-keys` | Print supported key names and exit. |  |
 | `--list-devices` | Print input devices and exit. |  |
 | `--print-config` | Print parsed configuration and exit. |  |
@@ -115,6 +119,10 @@ sudo udevadm trigger
 ```
 
 - Default sounds are bundled (`mute.wav`/`unmute.wav`); if they fail to play, `paplay` or `canberra-gtk-play` is used as fallback.
+- `--suppress` uses `/dev/uinput` to forward non-PTT events. If it fails:
+  - Ensure the `uinput` module is loaded (`modprobe uinput`).
+  - Ensure your user can access `/dev/uinput` (often via `input` group or a udev rule).
+  - If auto-detect selects the wrong device, pin `--device` to a `/dev/input/by-id/...-event-*` path.
 
 - Stop the service with:
 

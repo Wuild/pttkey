@@ -5,7 +5,8 @@ mod config;
 mod constants;
 
 use anyhow::{bail, Context, Result};
-use evdev::{Device, EventSummary, KeyCode};
+use evdev::uinput::VirtualDevice;
+use evdev::{Device, EventSummary, InputEvent, KeyCode, SynchronizationCode, UinputAbsSetup};
 use std::collections::HashSet;
 use std::fs;
 use std::io::ErrorKind;
@@ -30,6 +31,13 @@ fn print_devices() -> Result<()> {
     Ok(())
 }
 
+fn is_passthrough_device(device: &Device) -> bool {
+    device
+        .name()
+        .map(|name| name.starts_with("pttkey: "))
+        .unwrap_or(false)
+}
+
 /// Open the input device, using an explicit path or by probing available devices.
 fn open_device(config: &Config) -> Result<Device> {
     if let Some(path) = &config.device_path {
@@ -51,6 +59,7 @@ fn open_device(config: &Config) -> Result<Device> {
 
     let mut devices: Vec<Device> = evdev::enumerate()
         .map(|(_, d)| d)
+        .filter(|d| !is_passthrough_device(d))
         .filter(|d| {
             d.supported_keys()
                 .map(|k| config.keys.iter().all(|key| k.contains(*key)))
@@ -104,7 +113,11 @@ fn refresh_active_state(
     active: &mut bool,
 ) -> Result<()> {
     let all_pressed = config.keys.iter().all(|k| pressed.contains(k));
-    let desired_on = if config.reverse { !all_pressed } else { all_pressed };
+    let desired_on = if config.reverse {
+        !all_pressed
+    } else {
+        all_pressed
+    };
     if desired_on != *active {
         set_active_state(config, active, desired_on)?;
     }
@@ -116,13 +129,38 @@ fn handle_events(
     device: &mut Device,
     pressed: &mut HashSet<KeyCode>,
     active: &mut bool,
+    virtual_device: &mut Option<VirtualDevice>,
 ) -> Result<Option<std::io::Error>> {
     let fetch_error = match device.fetch_events() {
         Ok(events) => {
+            let mut forward_buffer: Vec<InputEvent> = Vec::new();
             for ev in events {
-                if let EventSummary::Key(_, key, value) = ev.destructure() {
+                let summary = ev.destructure();
+                if let EventSummary::Key(_, key, value) = summary {
                     update_pressed_keys(pressed, key, value);
                     refresh_active_state(config, pressed, active)?;
+                }
+                if let Some(virtual_device) = virtual_device.as_mut() {
+                    match summary {
+                        EventSummary::Key(_, key, _)
+                            if config.suppress && config.keys.contains(&key) => {}
+                        EventSummary::Synchronization(_, code, _)
+                            if code == SynchronizationCode::SYN_REPORT =>
+                        {
+                            if !forward_buffer.is_empty() {
+                                let _ = virtual_device.emit(&forward_buffer);
+                                forward_buffer.clear();
+                            }
+                        }
+                        _ => {
+                            forward_buffer.push(ev);
+                        }
+                    }
+                }
+            }
+            if let Some(virtual_device) = virtual_device.as_mut() {
+                if !forward_buffer.is_empty() {
+                    let _ = virtual_device.emit(&forward_buffer);
                 }
             }
             None
@@ -192,6 +230,68 @@ fn open_device_nonblocking(config: &Config) -> Result<Device> {
     let device = open_device_with_hint(config)?;
     set_device_nonblocking(&device)?;
     Ok(device)
+}
+
+fn create_virtual_device(device: &Device) -> Result<VirtualDevice> {
+    let name = format!("pttkey: {}", device.name().unwrap_or("input-device"));
+    let mut builder = VirtualDevice::builder()
+        .context("Failed to open /dev/uinput for suppression passthrough")?
+        .name(&name)
+        .input_id(device.input_id());
+
+    if let Some(keys) = device.supported_keys() {
+        builder = builder
+            .with_keys(keys)
+            .context("Failed to configure key capabilities for passthrough")?;
+    }
+    if let Some(rel_axes) = device.supported_relative_axes() {
+        builder = builder
+            .with_relative_axes(rel_axes)
+            .context("Failed to configure relative axes for passthrough")?;
+    }
+    if let Ok(absinfo) = device.get_absinfo() {
+        for (axis, info) in absinfo {
+            let setup = UinputAbsSetup::new(axis, info);
+            builder = builder
+                .with_absolute_axis(&setup)
+                .context("Failed to configure absolute axes for passthrough")?;
+        }
+    }
+    if let Some(switches) = device.supported_switches() {
+        builder = builder
+            .with_switches(switches)
+            .context("Failed to configure switch capabilities for passthrough")?;
+    }
+    if let Some(misc) = device.misc_properties() {
+        builder = builder
+            .with_msc(misc)
+            .context("Failed to configure misc capabilities for passthrough")?;
+    }
+    builder = builder
+        .with_properties(device.properties())
+        .context("Failed to configure device properties for passthrough")?;
+    if let Some(ff) = device.supported_ff() {
+        builder = builder
+            .with_ff(ff)
+            .context("Failed to configure force feedback for passthrough")?
+            .with_ff_effects_max(device.max_ff_effects() as u32);
+    }
+
+    builder
+        .build()
+        .context("Failed to create virtual passthrough device")
+}
+
+fn apply_device_suppression(config: &Config, device: &mut Device) -> Result<Option<VirtualDevice>> {
+    if config.suppress {
+        let virtual_device = create_virtual_device(device)?;
+        device
+            .grab()
+            .context("Failed to grab input device for suppression")?;
+        return Ok(Some(virtual_device));
+    }
+    let _ = device.ungrab();
+    Ok(None)
 }
 
 fn config_mtime(path: &std::path::Path) -> Option<std::time::SystemTime> {
@@ -287,6 +387,7 @@ fn main() -> Result<()> {
 
     let config_updates = spawn_config_watcher(config_path_used, running.clone());
     let mut device = open_device_nonblocking(&config)?;
+    let mut virtual_device = apply_device_suppression(&config, &mut device)?;
 
     if config.reverse {
         println!("🎙 Hold the configured button to mute");
@@ -300,17 +401,25 @@ fn main() -> Result<()> {
     refresh_active_state(&config, &pressed, &mut active)?;
 
     while running.load(Ordering::SeqCst) {
-        if let Some(err) = handle_events(&config, &mut device, &mut pressed, &mut active)? {
+        if let Some(err) = handle_events(
+            &config,
+            &mut device,
+            &mut pressed,
+            &mut active,
+            &mut virtual_device,
+        )? {
             eprintln!("Input device error: {err}. Reopening...");
             apply_off(&config)?;
             active = false;
             pressed.clear();
             device = reopen_device_loop(&config)?;
+            virtual_device = apply_device_suppression(&config, &mut device)?;
         }
 
         if let Ok(new_config) = config_updates.try_recv() {
             let keys_changed = config.keys != new_config.keys;
             let device_changed = config.device_path != new_config.device_path;
+            let suppress_changed = config.suppress != new_config.suppress;
             config = new_config;
             if let Err(err) = init_audio_cache(&config) {
                 eprintln!("Failed to reload sounds: {err}");
@@ -320,12 +429,17 @@ fn main() -> Result<()> {
                 active = false;
                 pressed.clear();
                 device = reopen_device_loop(&config)?;
+                virtual_device = apply_device_suppression(&config, &mut device)?;
+            }
+            if suppress_changed && !(keys_changed || device_changed) {
+                virtual_device = apply_device_suppression(&config, &mut device)?;
             }
             refresh_active_state(&config, &pressed, &mut active)?;
             println!("Config reloaded");
         }
 
-        std::thread::sleep(Duration::from_millis(10));
+        let sleep_ms = if config.suppress { 1 } else { 10 };
+        std::thread::sleep(Duration::from_millis(sleep_ms));
     }
 
     // Final safety mute

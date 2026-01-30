@@ -64,6 +64,8 @@ pub(crate) struct Config {
     pub(crate) startup_state: StartupState,
     /// Reverse behavior so holding keys mutes instead of unmutes.
     pub(crate) reverse: bool,
+    /// Suppress configured key events from reaching other apps.
+    pub(crate) suppress: bool,
 }
 
 /// Config data persisted to disk.
@@ -81,6 +83,7 @@ pub(crate) struct PersistedConfig {
     pub(crate) sound_volume: f32,
     pub(crate) startup_state: String,
     pub(crate) reverse: bool,
+    pub(crate) suppress: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -104,6 +107,7 @@ impl Default for PersistedConfig {
             sound_volume: 1.0,
             startup_state: "muted".to_string(),
             reverse: false,
+            suppress: false,
         }
     }
 }
@@ -260,6 +264,7 @@ pub(crate) fn persisted_from_config(config: &Config) -> PersistedConfig {
         sound_volume: config.sound_volume,
         startup_state: startup_state_label(config.startup_state).to_string(),
         reverse: config.reverse,
+        suppress: config.suppress,
     }
 }
 
@@ -293,6 +298,7 @@ pub(crate) fn print_persisted_config(path: &Path, config: &PersistedConfig) {
     );
     println!("config_sound_volume: {}", config.sound_volume);
     println!("config_startup_state: {}", config.startup_state);
+    println!("config_suppress: {}", config.suppress);
 }
 
 fn sound_setting_value(setting: &SoundChoice) -> Option<SoundSettingValue> {
@@ -371,6 +377,8 @@ Options:\n\
   --sound-off <PATH>  custom sound file for mic off (mp3/wav/ogg)\n\
   --sound-volume <FLOAT>  sound volume (default: 1.0)\n\
   --startup-state <muted|unmuted>  initial mic state (default: muted)\n\
+  --suppress          suppress only the configured key(s) from reaching other apps\n\
+  --no-suppress       do not suppress key events (default)\n\
   --sounds            enable on/off sounds (default)\n\
   --no-sounds         disable on/off sounds\n\
   --list-keys         print supported key names and exit\n\
@@ -432,6 +440,7 @@ pub(crate) fn print_config(config: &Config) {
     println!("sound_off: {}", sound_label(&config.sound_off));
     println!("sound_volume: {}", config.sound_volume);
     println!("startup_state: {startup_state}");
+    println!("suppress: {}", config.suppress);
 }
 
 pub(crate) fn config_from_persisted(base: PersistedConfig) -> Result<Config> {
@@ -454,6 +463,7 @@ pub(crate) fn config_from_persisted(base: PersistedConfig) -> Result<Config> {
     let sound_off = parse_sound_setting(base.sound_off);
     let sound_volume = base.sound_volume;
     let startup_state = parse_startup_state(&base.startup_state)?;
+    let suppress = base.suppress;
 
     if let SoundChoice::File(path) = &sound_on {
         if !path.exists() {
@@ -482,6 +492,7 @@ pub(crate) fn config_from_persisted(base: PersistedConfig) -> Result<Config> {
         print_config: false,
         dry_run: false,
         startup_state,
+        suppress,
     })
 }
 
@@ -509,6 +520,7 @@ pub(crate) fn parse_args(base: PersistedConfig) -> Result<(Config, bool)> {
     let mut dry_run = false;
     let mut startup_state = parse_startup_state(&base.startup_state)?;
     let mut startup_state_set = false;
+    let mut suppress = base.suppress;
     let mut persist_changed = false;
     let mut key_set = false;
 
@@ -610,6 +622,14 @@ pub(crate) fn parse_args(base: PersistedConfig) -> Result<(Config, bool)> {
                 sounds = false;
                 persist_changed = true;
             }
+            "--suppress" => {
+                suppress = true;
+                persist_changed = true;
+            }
+            "--no-suppress" => {
+                suppress = false;
+                persist_changed = true;
+            }
             "--list-keys" => {
                 list_keys = true;
             }
@@ -659,6 +679,7 @@ pub(crate) fn parse_args(base: PersistedConfig) -> Result<(Config, bool)> {
             print_config,
             dry_run,
             startup_state,
+            suppress,
         },
         persist_changed,
     ))
