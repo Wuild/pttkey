@@ -5,6 +5,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use crate::constants::{
     CONFIG_BACKUP_NAME, CONFIG_DIR_NAME, CONFIG_FILE_NAME, SUPPORTED_KEYS,
@@ -66,6 +67,8 @@ pub(crate) struct Config {
     pub(crate) reverse: bool,
     /// Suppress configured key events from reaching other apps.
     pub(crate) suppress: bool,
+    /// Delay deactivating the mic after releasing the configured keys.
+    pub(crate) release_delay_ms: u64,
 }
 
 /// Config data persisted to disk.
@@ -84,6 +87,7 @@ pub(crate) struct PersistedConfig {
     pub(crate) startup_state: String,
     pub(crate) reverse: bool,
     pub(crate) suppress: bool,
+    pub(crate) release_delay_ms: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -108,6 +112,7 @@ impl Default for PersistedConfig {
             startup_state: "muted".to_string(),
             reverse: false,
             suppress: false,
+            release_delay_ms: 0,
         }
     }
 }
@@ -225,6 +230,16 @@ fn mode_label(mode: Mode) -> &'static str {
     }
 }
 
+fn validate_release_delay(release_delay_ms: u64) -> Result<()> {
+    if Instant::now()
+        .checked_add(Duration::from_millis(release_delay_ms))
+        .is_none()
+    {
+        bail!("--release-delay-ms is too large");
+    }
+    Ok(())
+}
+
 fn parse_mode(value: &str) -> Result<Mode> {
     match value {
         "volume" => Ok(Mode::Volume),
@@ -265,6 +280,7 @@ pub(crate) fn persisted_from_config(config: &Config) -> PersistedConfig {
         startup_state: startup_state_label(config.startup_state).to_string(),
         reverse: config.reverse,
         suppress: config.suppress,
+        release_delay_ms: config.release_delay_ms,
     }
 }
 
@@ -299,6 +315,7 @@ pub(crate) fn print_persisted_config(path: &Path, config: &PersistedConfig) {
     println!("config_sound_volume: {}", config.sound_volume);
     println!("config_startup_state: {}", config.startup_state);
     println!("config_suppress: {}", config.suppress);
+    println!("config_release_delay_ms: {}", config.release_delay_ms);
 }
 
 fn sound_setting_value(setting: &SoundChoice) -> Option<SoundSettingValue> {
@@ -373,6 +390,7 @@ Options:\n\
   --no-reverse        disable reverse behavior\n\
   --on-level <FLOAT>  volume level when pressed (default: 1.0)\n\
   --off-level <FLOAT> volume level when released (default: 0.0)\n\
+  --release-delay-ms <MILLISECONDS> delay deactivation after release (default: 0)\n\
   --sound-on <PATH>   custom sound file for mic on (mp3/wav/ogg)\n\
   --sound-off <PATH>  custom sound file for mic off (mp3/wav/ogg)\n\
   --sound-volume <FLOAT>  sound volume (default: 1.0)\n\
@@ -441,9 +459,11 @@ pub(crate) fn print_config(config: &Config) {
     println!("sound_volume: {}", config.sound_volume);
     println!("startup_state: {startup_state}");
     println!("suppress: {}", config.suppress);
+    println!("release_delay_ms: {}", config.release_delay_ms);
 }
 
 pub(crate) fn config_from_persisted(base: PersistedConfig) -> Result<Config> {
+    validate_release_delay(base.release_delay_ms)?;
     let mut keys: Vec<KeyCode> = base
         .keys
         .iter()
@@ -493,6 +513,7 @@ pub(crate) fn config_from_persisted(base: PersistedConfig) -> Result<Config> {
         dry_run: false,
         startup_state,
         suppress,
+        release_delay_ms: base.release_delay_ms,
     })
 }
 
@@ -521,6 +542,7 @@ pub(crate) fn parse_args(base: PersistedConfig) -> Result<(Config, bool)> {
     let mut startup_state = parse_startup_state(&base.startup_state)?;
     let mut startup_state_set = false;
     let mut suppress = base.suppress;
+    let mut release_delay_ms = base.release_delay_ms;
     let mut persist_changed = false;
     let mut key_set = false;
 
@@ -622,6 +644,14 @@ pub(crate) fn parse_args(base: PersistedConfig) -> Result<(Config, bool)> {
                 sounds = false;
                 persist_changed = true;
             }
+            "--release-delay-ms" => {
+                i += 1;
+                let value = args.get(i).context("missing value for --release-delay-ms")?;
+                release_delay_ms = value
+                    .parse::<u64>()
+                    .with_context(|| format!("invalid --release-delay-ms '{value}'"))?;
+                persist_changed = true;
+            }
             "--suppress" => {
                 suppress = true;
                 persist_changed = true;
@@ -661,6 +691,7 @@ pub(crate) fn parse_args(base: PersistedConfig) -> Result<(Config, bool)> {
     if reverse && !startup_state_set {
         startup_state = StartupState::Unmuted;
     }
+    validate_release_delay(release_delay_ms)?;
 
     Ok((
         Config {
@@ -680,6 +711,7 @@ pub(crate) fn parse_args(base: PersistedConfig) -> Result<(Config, bool)> {
             dry_run,
             startup_state,
             suppress,
+            release_delay_ms,
         },
         persist_changed,
     ))

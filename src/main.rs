@@ -14,7 +14,7 @@ use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::audio::{apply_off, apply_on, init_audio_cache, play_transition_sound};
 use crate::config::{
@@ -107,10 +107,39 @@ fn update_pressed_keys(pressed: &mut HashSet<KeyCode>, key: KeyCode, value: i32)
     }
 }
 
+fn update_pending_release(
+    is_active: bool,
+    is_desired_on: bool,
+    is_reverse: bool,
+    release_delay_ms: u64,
+    pending_release: &mut Option<Instant>,
+    now: Instant,
+) -> Result<()> {
+    if is_desired_on || !is_active || is_reverse || release_delay_ms == 0 {
+        *pending_release = None;
+    } else if pending_release.is_none() {
+        *pending_release = Some(
+            now.checked_add(Duration::from_millis(release_delay_ms))
+                .context("--release-delay-ms is too large")?,
+        );
+    }
+    Ok(())
+}
+
+fn is_pending_release_expired(pending_release: &mut Option<Instant>, now: Instant) -> bool {
+    if pending_release.is_some_and(|deadline| now >= deadline) {
+        *pending_release = None;
+        true
+    } else {
+        false
+    }
+}
+
 fn refresh_active_state(
     config: &Config,
     pressed: &HashSet<KeyCode>,
     active: &mut bool,
+    pending_release: &mut Option<Instant>,
 ) -> Result<()> {
     let all_pressed = config.keys.iter().all(|k| pressed.contains(k));
     let desired_on = if config.reverse {
@@ -118,8 +147,18 @@ fn refresh_active_state(
     } else {
         all_pressed
     };
-    if desired_on != *active {
-        set_active_state(config, active, desired_on)?;
+    update_pending_release(
+        *active,
+        desired_on,
+        config.reverse,
+        config.release_delay_ms,
+        pending_release,
+        Instant::now(),
+    )?;
+    if desired_on && !*active {
+        set_active_state(config, active, true)?;
+    } else if !desired_on && *active && (config.reverse || config.release_delay_ms == 0) {
+        set_active_state(config, active, false)?;
     }
     Ok(())
 }
@@ -129,6 +168,7 @@ fn handle_events(
     device: &mut Device,
     pressed: &mut HashSet<KeyCode>,
     active: &mut bool,
+    pending_release: &mut Option<Instant>,
     virtual_device: &mut Option<VirtualDevice>,
 ) -> Result<Option<std::io::Error>> {
     let fetch_error = match device.fetch_events() {
@@ -138,7 +178,7 @@ fn handle_events(
                 let summary = ev.destructure();
                 if let EventSummary::Key(_, key, value) = summary {
                     update_pressed_keys(pressed, key, value);
-                    refresh_active_state(config, pressed, active)?;
+                    refresh_active_state(config, pressed, active, pending_release)?;
                 }
                 if let Some(virtual_device) = virtual_device.as_mut() {
                     match summary {
@@ -397,8 +437,9 @@ fn main() -> Result<()> {
 
     let mut pressed: HashSet<KeyCode> = HashSet::new();
     let mut active = false;
+    let mut pending_release = None;
 
-    refresh_active_state(&config, &pressed, &mut active)?;
+    refresh_active_state(&config, &pressed, &mut active, &mut pending_release)?;
 
     while running.load(Ordering::SeqCst) {
         if let Some(err) = handle_events(
@@ -406,11 +447,13 @@ fn main() -> Result<()> {
             &mut device,
             &mut pressed,
             &mut active,
+            &mut pending_release,
             &mut virtual_device,
         )? {
             eprintln!("Input device error: {err}. Reopening...");
             apply_off(&config)?;
             active = false;
+            pending_release = None;
             pressed.clear();
             device = reopen_device_loop(&config)?;
             virtual_device = apply_device_suppression(&config, &mut device)?;
@@ -421,6 +464,7 @@ fn main() -> Result<()> {
             let device_changed = config.device_path != new_config.device_path;
             let suppress_changed = config.suppress != new_config.suppress;
             config = new_config;
+            pending_release = None;
             if let Err(err) = init_audio_cache(&config) {
                 eprintln!("Failed to reload sounds: {err}");
             }
@@ -434,8 +478,12 @@ fn main() -> Result<()> {
             if suppress_changed && !(keys_changed || device_changed) {
                 virtual_device = apply_device_suppression(&config, &mut device)?;
             }
-            refresh_active_state(&config, &pressed, &mut active)?;
+            refresh_active_state(&config, &pressed, &mut active, &mut pending_release)?;
             println!("Config reloaded");
+        }
+
+        if is_pending_release_expired(&mut pending_release, Instant::now()) {
+            set_active_state(&config, &mut active, false)?;
         }
 
         let sleep_ms = if config.suppress { 1 } else { 10 };
