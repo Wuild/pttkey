@@ -22,6 +22,7 @@ cargo build --release
 pttkey --key BTN_EXTRA
 pttkey --key KEY_F9 --mode mute --no-sounds
 pttkey --key KEY_LEFTCTRL+KEY_F --mode mute
+pttkey --key BTN_EXTRA --release-delay-ms 250
 pttkey --sound-on ~/on.wav --sound-off ~/off.ogg
 pttkey --sound-on ~/on.wav --sound-volume 0.5
 pttkey --sound-on false --sound-volume 0.3
@@ -50,6 +51,7 @@ The app reloads the config automatically when the file changes.
 | `--no-reverse` | Disable reverse behavior (normal push-to-talk). | Optional |
 | `--on-level <FLOAT>` | Volume when pressed. | Default: `1.0` |
 | `--off-level <FLOAT>` | Volume when released. | Default: `0.0` |
+| `--release-delay-ms <MILLISECONDS>` | Delay mic deactivation after releasing the configured keys. Ignored in reverse mode. | Default: `0` |
 | `--sound-on <PATH>` | Custom sound file for mic on (`mp3`, `wav`, `ogg`) or `false` to disable. | Optional |
 | `--sound-off <PATH>` | Custom sound file for mic off (`mp3`, `wav`, `ogg`) or `false` to disable. | Optional |
 | `--sound-volume <FLOAT>` | Volume for sounds. | Default: `1.0` |
